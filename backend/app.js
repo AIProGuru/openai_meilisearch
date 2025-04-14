@@ -61,8 +61,9 @@ async function getOpenAIResponse(query, searchResultsText) {
     // const userMessage = await saveMessage({ chatId, userId, message, sender: 'user' });.
     const message = await openai.beta.threads.messages.create(THREAD_ID, {
       role: "user",
-      content: `Answer the next QUESTION based on the given CONteXt. You don't need to rely 100% on the given data. In some cases, the given context will have nothing related to the question. So, you have to review all the chat history
-      
+      content: `Answer the next QUESTION based on the given CONTEXT. You don't need to rely 100% on the given data. In some cases, the given context will have nothing related to the question. So, you have to review all the chat history.
+      QUESTION: ${query}
+      CONTEXT: ${searchResultsText}
       `,
     });
 
