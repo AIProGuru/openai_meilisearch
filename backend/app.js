@@ -17,16 +17,42 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// /*  Original Search
+
+// async function searchMeili(query) {
+//   const response = await axios.post(
+//     "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
+//     {
+//       q: query,
+//       limit: 5, // ✅ Limit to top 5 results
+//     },
+//     {
+//       headers: {
+//         Authorization: `Bearer ${MEILISEARCH_API_KEY}`, // ✅ Required by your server
+//         "Content-Type": "application/json",
+//       },
+//     }
+//   );
+//   return response.data;
+// }
+// */
+
+// /// AI powered Search
+
 async function searchMeili(query) {
   const response = await axios.post(
-    "https://api.docs.bufetemejia.com/indexes/PI-El-Salvador/search",
+    "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
     {
       q: query,
-      limit: 5, // ✅ Limit to top 5 results
+      limit: 5,
+      hybrid: {
+        semanticRatio: 1,         // 🔍 Use pure semantic search (1 = full semantic, 0 = keyword)
+        embedder: "default",      // 🧠 Matches the embedder configured in Meilisearch
+      },
     },
     {
       headers: {
-        Authorization: `Bearer ${MEILISEARCH_API_KEY}`, // ✅ Required by your server
+        Authorization: `Bearer ${MEILISEARCH_API_KEY}`,
         "Content-Type": "application/json",
       },
     }
@@ -96,10 +122,11 @@ app.post("/meilisearch", async (req, res) => {
 
   try {
     const results = await searchMeili(query);
+    console.log(results.hits)
     const searchResultsText = results.hits
       .map(
         (hit, index) =>
-          `${index + 1}. ${hit.text}`
+          `${index + 1}. law_title: ${hit.law_title}, type: ${hit.type}, chapter_number: ${hit.chapter.number}, chapter_title: ${hit.chapter.title}, section_number: ${hit.section.number}, section_title: ${hit.section.title}, artitle_number: ${hit.article.number}, article_title: ${hit.article.title} content: ${hit.text}`
       )
       .join("\n\n");
 
