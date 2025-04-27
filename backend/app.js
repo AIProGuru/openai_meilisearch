@@ -42,15 +42,26 @@ const openai = new OpenAI({
 
 // /// AI powered Search
 
-async function searchMeili(query) {
+async function searchMeili(query, country) {
+  const indexUrlMap = {
+    "El Salvador": "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
+    "Costa Rica": "https://api.docs.bufetemejia.com/indexes/Costa-Rica/search",
+  };
+
+  const indexUrl = indexUrlMap[country];
+
+  if (!indexUrl) {
+    throw new Error(`No index URL configured for country: ${country}`);
+  }
+
   const response = await axios.post(
-    "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
+    indexUrl,
     {
       q: query,
       limit: 5,
       hybrid: {
-        semanticRatio: 1,         // 🔍 Use pure semantic search (1 = full semantic, 0 = keyword)
-        embedder: "default",      // 🧠 Matches the embedder configured in Meilisearch
+        semanticRatio: 1,
+        embedder: "default",
       },
     },
     {
@@ -60,8 +71,10 @@ async function searchMeili(query) {
       },
     }
   );
+
   return response.data;
 }
+
 
 // async function createAssistant() {
 //   try {
@@ -121,11 +134,11 @@ async function getOpenAIResponse(query, searchResultsText, threadID) {
 }
 
 app.post("/api/meilisearch", async (req, res) => {
-  const { query, threadID, userID } = req.body;
+  const { query, threadID, userID, country } = req.body;
   console.log("@@@@@@@@@@@@@@@@", threadID)
 
   try {
-    const results = await searchMeili(query);
+    const results = await searchMeili(query, country);
 
     const searchResultsText = results.hits
       .map(
