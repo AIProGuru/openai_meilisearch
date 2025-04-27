@@ -1,21 +1,24 @@
 const express = require("express");
 const axios = require("axios");
+const cors = require('cors')
 require("dotenv").config();
 const OpenAI = require("openai");
+const supabase = require("./src/integration/supabase/client")
 
 const app = express();
 const port = 3000;
 
 const MEILISEARCH_API_KEY = process.env.MEILI_API_KEY;
-
-const ASSISTANT_ID = "asst_HvVtjJYAOXyt5YqtBckECV2B";
-const THREAD_ID = "thread_CCtvmAdOOZFwpvwH7kXJR2HF";
+const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
 app.use(express.json());
+app.use(cors());
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+
 
 // /*  Original Search
 
@@ -82,18 +85,18 @@ async function searchMeili(query) {
 //   }
 // }
 
-async function getOpenAIResponse(query, searchResultsText) {
+async function getOpenAIResponse(query, searchResultsText, threadID) {
   try {
     // const userMessage = await saveMessage({ chatId, userId, message, sender: 'user' });.
-    const message = await openai.beta.threads.messages.create(THREAD_ID, {
+    const message = await openai.beta.threads.messages.create(threadID, {
       role: "user",
-      content: `Answer the next QUESTION based on the given CONTEXT. You don't need to rely 100% on the given data. In some cases, the given context will have nothing related to the question. So, you have to review all the chat history.
+      content: `Answer the next QUESTION based on the given CONTEXT. You don't need to rely 100% on the given data. In some cases, the given context will have nothing related to the question. So, you have to review all the chat history. If the QUESTION is general chat, you can return general response. And if possible, include the article number or the name of the referred law.
       QUESTION: ${query}
       CONTEXT: ${searchResultsText}
       `,
     });
 
-    let run = await openai.beta.threads.runs.createAndPoll(THREAD_ID, {
+    let run = await openai.beta.threads.runs.createAndPoll(threadID, {
       assistant_id: ASSISTANT_ID,
     });
 
@@ -117,25 +120,111 @@ async function getOpenAIResponse(query, searchResultsText) {
   }
 }
 
-app.post("/meilisearch", async (req, res) => {
-  const { query } = req.body;
+app.post("/api/meilisearch", async (req, res) => {
+  const { query, threadID, userID } = req.body;
+  console.log("@@@@@@@@@@@@@@@@", threadID)
 
   try {
     const results = await searchMeili(query);
-    console.log(results.hits)
+
     const searchResultsText = results.hits
       .map(
         (hit, index) =>
-          `${index + 1}. law_title: ${hit.law_title}, type: ${hit.type}, chapter_number: ${hit.chapter.number}, chapter_title: ${hit.chapter.title}, section_number: ${hit.section.number}, section_title: ${hit.section.title}, artitle_number: ${hit.article.number}, article_title: ${hit.article.title} content: ${hit.text}`
+          `${index + 1}. law_title: ${hit.law_title ?? null}, type: ${hit.type ?? null}, title_number: ${hit.title?.number ?? null}, title_text: ${hit.title?.text ?? null} chapter_number: ${hit.chapter?.number ?? null}, chapter_title: ${hit.chapter?.title ?? null}, section_number: ${hit.section?.number ?? null}, section_title: ${hit.section?.title ?? null}, artitle_number: ${hit.article?.number ?? null}, article_title: ${hit.article?.title ?? null} content: ${hit.text ?? null}`
       )
       .join("\n\n");
 
-    const summary = await getOpenAIResponse(query, searchResultsText);
-    console.log(summary);
-    res.json(summary);
+    let currentThreadID = threadID;
+
+    // If no thread exists, create one
+    if (!threadID) {
+      const thread = await openai.beta.threads.create();
+      currentThreadID = thread.id;
+      const title = query.length > 50 ? query.slice(0, 47) + "..." : query;
+
+      const { data, error } = await supabase
+        .from("chat_threads")
+        .insert([
+          {
+            user_id: userID,
+            title,
+            thread_id: currentThreadID,
+          },
+        ])
+        .select();
+
+      if (error) {
+        console.error("Supabase error:", error);
+        return res.status(500).json({ error: "Failed to save thread" });
+      }
+    }
+
+    const summary = await getOpenAIResponse(query, searchResultsText, currentThreadID);
+    await supabase
+      .from("chat_threads")
+      .update({ updated_at: new Date() })
+      .eq("thread_id", currentThreadID);
+    res.json({ summary, threadID: currentThreadID });
+
   } catch (error) {
     console.error("Search error:", error.response?.data || error.message);
     res.status(500).send("Search failed");
+  }
+});
+
+app.post("/api/get-thread-history", async (req, res) => {
+  const { threadId } = req.body;
+
+  try {
+    const messages = await openai.beta.threads.messages.list(threadId);
+
+    const cleanMessages = messages.data.map((msg) => {
+      let content = "";
+
+      if (msg.content?.[0]?.type === "text") {
+        const fullText = msg.content[0].text.value;
+
+        if (msg.role === "user") {
+          // Try to extract content after "QUESTION:"
+          const questionMatch = fullText.match(/QUESTION:\s*(.*?)\s*CONTEXT:/s);
+          content = questionMatch ? questionMatch[1].trim() : fullText.trim();
+        } else {
+          content = fullText.trim(); // assistant response stays unchanged
+        }
+      }
+
+      return {
+        id: msg.id,
+        role: msg.role,
+        content,
+      };
+    });
+
+    res.json({ messages: cleanMessages });
+
+  } catch (error) {
+    console.error("getting thread history error:", error.response?.data || error.message);
+    res.status(500).send("getting thread history error");
+  }
+});
+
+
+
+app.post("/admin/create-assistant", async (req, res) => {
+  try {
+    const assistant = await openai.beta.assistants.create({
+      name: `Legal Assistant`,
+      instructions: "You are a legal assistant that helps users understand legal documents.",
+      model: "gpt-4o",
+      // tools: [{ type: "retrieval" }],
+    });
+
+    res.json({ message: "Assistant Created Successfully", id: assistant.id });
+    //save this assistant id in .env file
+
+  } catch (error) {
+    console.error("Assistant Creation Failed:", error.response?.data || error.message);
+    res.status(500).send("Assistant Creation Failed");
   }
 });
 
