@@ -45,7 +45,7 @@ const openai = new OpenAI({
 async function searchMeili(query, country) {
   const indexUrlMap = {
     "El Salvador": "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
-    "Costa Rica": "https://api.docs.bufetemejia.com/indexes/Costa-Rica/search",
+    "Costa Rica": "https://api.docs.bufetemejia.com/indexes/COSTA-RICA/search",
   };
 
   const indexUrl = indexUrlMap[country];
