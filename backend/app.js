@@ -1,47 +1,33 @@
+// server.js
 const express = require("express");
 const axios = require("axios");
-const cors = require('cors')
+const cors = require("cors");
 require("dotenv").config();
+
+const { SocksProxyAgent } = require("socks-proxy-agent");
 const OpenAI = require("openai");
-const supabase = require("./src/integration/supabase/client")
+const supabase = require("./src/integration/supabase/client");
 
 const app = express();
 const port = 3000;
 
-const MEILISEARCH_API_KEY = process.env.MEILI_API_KEY;
-const ASSISTANT_ID = process.env.ASSISTANT_ID;
-
 app.use(express.json());
 app.use(cors());
 
+const proxyUrl = process.env.PROXY_URL || "socks5h://127.0.0.1:1080";
+const httpsAgent = new SocksProxyAgent(proxyUrl);
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  httpAgent: httpsAgent,
 });
 
+const MEILISEARCH_API_KEY = process.env.MEILI_API_KEY;
+const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
-
-// /*  Original Search
-
-// async function searchMeili(query) {
-//   const response = await axios.post(
-//     "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
-//     {
-//       q: query,
-//       limit: 5, // ✅ Limit to top 5 results
-//     },
-//     {
-//       headers: {
-//         Authorization: `Bearer ${MEILISEARCH_API_KEY}`, // ✅ Required by your server
-//         "Content-Type": "application/json",
-//       },
-//     }
-//   );
-//   return response.data;
-// }
-// */
-
-// /// AI powered Search
-
+// -----------------------
+// Utility: MeiliSearch
+// -----------------------
 async function searchMeili(query, country) {
   const indexUrlMap = {
     "El Salvador": "https://api.docs.bufetemejia.com/indexes/El-Salvador-test/search",
@@ -49,10 +35,7 @@ async function searchMeili(query, country) {
   };
 
   const indexUrl = indexUrlMap[country];
-
-  if (!indexUrl) {
-    throw new Error(`No index URL configured for country: ${country}`);
-  }
+  if (!indexUrl) throw new Error(`No index for country: ${country}`);
 
   const response = await axios.post(
     indexUrl,
@@ -72,90 +55,85 @@ async function searchMeili(query, country) {
     }
   );
 
-  return response.data;
+  const hits = response.data.hits;
+  const formatted = hits
+    .map((hit, index) =>
+      `${index + 1}. law_title: ${hit.law_title ?? "N/A"}, type: ${hit.type ?? "N/A"}, title_number: ${hit.title?.number ?? "N/A"}, title_text: ${hit.title?.text ?? "N/A"}, chapter_number: ${hit.chapter?.number ?? "N/A"}, chapter_title: ${hit.chapter?.title ?? "N/A"}, section_number: ${hit.section?.number ?? "N/A"}, section_title: ${hit.section?.title ?? "N/A"}, article_number: ${hit.article?.number ?? "N/A"}, article_title: ${hit.article?.title ?? "N/A"}, content: ${hit.text ?? "N/A"}`
+    )
+    .join("\n\n");
+
+  return formatted;
 }
 
+// ---------------------------
+//  /admin/create-assistant
+// ---------------------------
+app.post("/admin/create-assistant", async (req, res) => {
+  const systemPrompt = `
+You are a legal drafting assistant for lawyers.
 
-// async function createAssistant() {
-//   try {
-//     const assistant = await openai.beta.assistants.create({
-//       name: `legal assistant`,
-//       instructions: "You are a legal assistant",
-//       model: "gpt-4o",
-//       //   tools: [{ type: "file_search" }],
-//     });
+Follow this process:
+1. Ask what type of legal writing the user wants.
+2. Ask all critical information needed — parties involved, legal claims, dates, and jurisdiction.
+3. Ask whether the user knows any law title/chapter/article. If yes, use it to call the \`searchLegalBasis\` tool.
+4. If not provided, infer keywords and still call the tool.
+5. If any info is missing, use placeholders like “[Insert date here]” and tell user to fill in.
 
-//     const thread = await openai.beta.threads.create();
+Respond in the same language the user used. Be formal, concise, and legally accurate.
+`;
 
-//     const newAssistant = {
-//       assistantId: assistant.id,
-//       threadId: thread.id,
-//     };
-
-//     return newAssistant;
-//   } catch (error) {
-//     console.error("Error creating assistant:", error);
-//   }
-// }
-
-async function getOpenAIResponse(query, searchResultsText, threadID) {
   try {
-    // const userMessage = await saveMessage({ chatId, userId, message, sender: 'user' });.
-    const message = await openai.beta.threads.messages.create(threadID, {
-      role: "user",
-      content: `Answer the next QUESTION based on the given CONTEXT. You don't need to rely 100% on the given data. In some cases, the given context will have nothing related to the question. So, you have to review all the chat history. If the QUESTION is general chat, you can return general response. And if possible, include the article number or the name of the referred law.
-      QUESTION: ${query}
-      CONTEXT: ${searchResultsText}
-      `,
+    const assistant = await openai.beta.assistants.create({
+      name: "Legal Drafting Assistant",
+      instructions: systemPrompt,
+      model: "gpt-4o",
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "searchLegalBasis",
+            description: "Searches for relevant legal texts based on keywords and country",
+            parameters: {
+              type: "object",
+              properties: {
+                keywords: {
+                  type: "string",
+                  description: "Keywords to search legal content for",
+                },
+                country: {
+                  type: "string",
+                  description: "Country to restrict the legal search (e.g., El Salvador)",
+                },
+              },
+              required: ["keywords", "country"],
+            },
+          },
+        },
+      ],
     });
 
-    let run = await openai.beta.threads.runs.createAndPoll(threadID, {
-      assistant_id: ASSISTANT_ID,
-    });
-
-    if (run.status === "completed") {
-      const messages = await openai.beta.threads.messages.list(run.thread_id);
-      console.log(
-        "###################################",
-        messages.data[0].content[0].text.value
-      );
-      // for (const message of messages.data.reverse()) {
-      //   console.log(`${message.role} > ${message.content[0].text.value}`);
-      // }
-      return messages.data[0].content[0].text.value
-    } else {
-      console.log(run.status);
-    }
-
-    // await saveMessage({ chatId, userId, message: botResponse, sender: 'bot' });
+    res.json({ message: "Assistant Created Successfully", id: assistant.id });
   } catch (error) {
-    console.log(error.message);
+    console.error("Assistant Creation Failed:", error.response?.data || error.message);
+    res.status(500).send("Assistant Creation Failed");
   }
-}
+});
 
-app.post("/api/meilisearch", async (req, res) => {
+// ---------------------------
+//  /api/chat
+// ---------------------------
+app.post("/api/chat", async (req, res) => {
   const { query, threadID, userID, country } = req.body;
-  console.log("@@@@@@@@@@@@@@@@", threadID)
+  let currentThreadID = threadID;
 
   try {
-    const results = await searchMeili(query, country);
-
-    const searchResultsText = results.hits
-      .map(
-        (hit, index) =>
-          `${index + 1}. law_title: ${hit.law_title ?? null}, type: ${hit.type ?? null}, title_number: ${hit.title?.number ?? null}, title_text: ${hit.title?.text ?? null} chapter_number: ${hit.chapter?.number ?? null}, chapter_title: ${hit.chapter?.title ?? null}, section_number: ${hit.section?.number ?? null}, section_title: ${hit.section?.title ?? null}, artitle_number: ${hit.article?.number ?? null}, article_title: ${hit.article?.title ?? null} content: ${hit.text ?? null}`
-      )
-      .join("\n\n");
-
-    let currentThreadID = threadID;
-
-    // If no thread exists, create one
-    if (!threadID) {
+    // Create thread if needed
+    if (!currentThreadID) {
       const thread = await openai.beta.threads.create();
       currentThreadID = thread.id;
       const title = query.length > 50 ? query.slice(0, 47) + "..." : query;
 
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from("chat_threads")
         .insert([
           {
@@ -166,44 +144,76 @@ app.post("/api/meilisearch", async (req, res) => {
         ])
         .select();
 
-      if (error) {
-        console.error("Supabase error:", error);
-        return res.status(500).json({ error: "Failed to save thread" });
-      }
+      if (error) throw new Error("Supabase thread insert failed");
     }
 
-    const summary = await getOpenAIResponse(query, searchResultsText, currentThreadID);
-    await supabase
-      .from("chat_threads")
-      .update({ updated_at: new Date() })
-      .eq("thread_id", currentThreadID);
-    res.json({ summary, threadID: currentThreadID });
+    // Send user message
+    await openai.beta.threads.messages.create(currentThreadID, {
+      role: "user",
+      content: query,
+    });
 
-  } catch (error) {
-    console.error("Search error:", error.response?.data || error.message);
-    res.status(500).send("Search failed");
+    // Run the assistant
+    let run = await openai.beta.threads.runs.createAndPoll(currentThreadID, {
+      assistant_id: ASSISTANT_ID,
+    });
+
+    // If tool calls detected
+    if (run.status === "requires_action" && run.required_action?.type === "submit_tool_outputs") {
+      console.log("detected tool call")
+      const toolCalls = run.required_action.submit_tool_outputs.tool_calls;
+
+      const toolOutputs = await Promise.all(
+        toolCalls.map(async (toolCall) => {
+          const args = JSON.parse(toolCall.function.arguments);
+          const result = await searchMeili(args.keywords, args.country);
+          return {
+            tool_call_id: toolCall.id,
+            output: result,
+          };
+        })
+      );
+
+      console.log("tool output", toolOutputs)
+
+      // Submit tool outputs
+      run = await openai.beta.threads.runs.submitToolOutputsAndPoll(currentThreadID, run.id, {
+        tool_outputs: toolOutputs,
+      });
+    }
+
+    // Return final assistant message
+    if (run.status === "completed") {
+      const messages = await openai.beta.threads.messages.list(currentThreadID);
+      const final = messages.data[0].content[0].text.value;
+      await supabase
+        .from("chat_threads")
+        .update({ updated_at: new Date() })
+        .eq("thread_id", currentThreadID);
+
+      return res.json({ response: final, threadID: currentThreadID });
+    } else {
+      return res.status(500).send("Run did not complete.");
+    }
+  } catch (err) {
+    console.error("Chat error:", err.response?.data || err.message);
+    return res.status(500).send("Something went wrong.");
   }
 });
 
+// ---------------------------
+//  /api/get-thread-history
+// ---------------------------
 app.post("/api/get-thread-history", async (req, res) => {
   const { threadId } = req.body;
 
   try {
     const messages = await openai.beta.threads.messages.list(threadId);
-
     const cleanMessages = messages.data.map((msg) => {
       let content = "";
 
       if (msg.content?.[0]?.type === "text") {
-        const fullText = msg.content[0].text.value;
-
-        if (msg.role === "user") {
-          // Try to extract content after "QUESTION:"
-          const questionMatch = fullText.match(/QUESTION:\s*(.*?)\s*CONTEXT:/s);
-          content = questionMatch ? questionMatch[1].trim() : fullText.trim();
-        } else {
-          content = fullText.trim(); // assistant response stays unchanged
-        }
+        content = msg.content[0].text.value;
       }
 
       return {
@@ -214,33 +224,13 @@ app.post("/api/get-thread-history", async (req, res) => {
     });
 
     res.json({ messages: cleanMessages });
-
   } catch (error) {
-    console.error("getting thread history error:", error.response?.data || error.message);
-    res.status(500).send("getting thread history error");
+    console.error("Thread history error:", error.response?.data || error.message);
+    res.status(500).send("Failed to get thread history");
   }
 });
 
-
-
-app.post("/admin/create-assistant", async (req, res) => {
-  try {
-    const assistant = await openai.beta.assistants.create({
-      name: `Legal Assistant`,
-      instructions: "You are a legal assistant that helps users understand legal documents.",
-      model: "gpt-4o",
-      // tools: [{ type: "retrieval" }],
-    });
-
-    res.json({ message: "Assistant Created Successfully", id: assistant.id });
-    //save this assistant id in .env file
-
-  } catch (error) {
-    console.error("Assistant Creation Failed:", error.response?.data || error.message);
-    res.status(500).send("Assistant Creation Failed");
-  }
-});
-
+// ---------------------------
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
+  console.log(`Server running at http://localhost:${port}`);
 });
